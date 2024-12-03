@@ -1,0 +1,22 @@
+[
+    {
+        "name": "test_file",
+        "location": "test_location",
+        "link": "http://localhost:9000/local-test-bucket/ea544cac-f190-4f73-a26c-ad6ff7af434c.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=cuUg1gWlOuzIDDVDyhhI%2F20241203%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20241203T122426Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=529b465c19805d72db915cacbbc3483dafd8c9a333505106c44d3bb02e03a245"
+    },
+    {
+        "name": "xrGqZHPd",
+        "location": "JoFImeal",
+        "link": "http://localhost:9000/local-test-bucket/ea4b4e4e-d804-4f51-bea3-e5e2e64f0c4c.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=cuUg1gWlOuzIDDVDyhhI%2F20241203%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20241203T122426Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=2b3b3b1a0a60dc56ab6d66278adade6f02c43ae63de013b27feacd730d133dc8"
+    },
+    {
+        "name": "test_file",
+        "location": "test_location",
+        "link": "http://localhost:9000/local-test-bucket/66608879-4dab-4678-81c1-057a2e378362.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=cuUg1gWlOuzIDDVDyhhI%2F20241203%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20241203T122426Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=1ff410e9f3895e0c60d1e68e0bed584cadafe9415465a61f0d9c2b894e35fbfe"
+    },
+    {
+        "name": "cat 4",
+        "location": "location 1",
+        "link": "http://localhost:9000/local-test-bucket/29d8f97a-524a-46f3-8236-5c227dfc4a2e.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=cuUg1gWlOuzIDDVDyhhI%2F20241203%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20241203T122441Z&X-Amz-Expires=604800&X-Amz-SignedHeaders=host&X-Amz-Signature=ee5051835bcab6381460592c4b684e100a56bcb7a904810ccfc4d0bee076f5b7"
+    }
+]

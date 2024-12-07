@@ -13,10 +13,10 @@ from fastapi.requests import Request
 import json
 
 app = FastAPI()
-
+print(os.getenv('MINIO_ACCESS_KEY'))
 minio_client = Minio("localhost:9000",
-    access_key="cuUg1gWlOuzIDDVDyhhI",
-    secret_key="Blibf18yHsUZkDTjlIb3a2UvZNrcqMtz9Vcx3m2Z",
+    access_key="XUoG94rCRsPAg72OSgJ1",
+    secret_key="CQSuqZ7iAJTQUrwml9gthdSH2anUTm096WgQELia",
     secure=False)
 
 BUCKET_NAME = "local-test-bucket"
@@ -96,7 +96,7 @@ async def upload_file(
     #     )
     
     
-
+    # comment this to disable hash check
     if file_hash != hash:
         print(file_hash)
         raise HTTPException(status_code=400, detail="Hash mismatch")

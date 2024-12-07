@@ -34,6 +34,6 @@ tomli==2.2.1
 typer==0.14.0
 typing_extensions==4.12.2
 uvicorn==0.32.1
-uvloop==0.21.0
+uvloop==0.21.0; platform_system != "Windows"
 watchfiles==1.0.0
 websockets==14.1

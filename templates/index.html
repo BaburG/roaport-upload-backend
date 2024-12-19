@@ -17,7 +17,8 @@
                     <img src="{{ image.link }}" class="card-img-top" alt="{{ image.name }}">
                     <div class="card-body">
                         <h5 class="card-title">{{ image.name }}</h5>
-                        <p class="card-text"><strong>Location:</strong> {{ image.location }}</p>
+                        <p class="card-text"><strong>Location:</strong> ({{ image.longitude }}, {{ image.latitude }})</p>
+                        <p class="card-text"><strong>Date Created: </strong> {{image.date_created}}</p>
                     </div>
                 </div>
             </div>

@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     cnx = psycopg2.connect(
         user=os.getenv("AZURE_SQL_USERNAME"),
         password=os.getenv("AZURE_SQL_PASSWORD"),
-        host="roaport-sql.postgres.database.azure.com",
+        host=os.getenv("AZURE_SQL_HOST"),
         port=5432,
         database="postgres"
     )

@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
         password=os.getenv("AZURE_SQL_PASSWORD"),
         host=os.getenv("AZURE_SQL_HOST"),
         port=5432,
-        database="postgres"
+        database="roaport_prod"
     )
     cnx.autocommit = False  # Disable auto-commit for manual transaction management
     print("Connected to azureSQL successfully")
@@ -54,27 +54,18 @@ async def lifespan(app: FastAPI):
         cnx.close()
 
 
-def save_metadata_to_db(name: str, longitude: float, latitude: float, bucket_name: str, file_name: str):
+def save_metadata_to_db(name: str, longitude: float, latitude: float, bucket_name: str, file_name: str, username: str, type: str, detail: str):
     global cnx
     try:
         with cnx.cursor() as cursor:
             # Insert into 'reports' table
             query_reports = """
-                INSERT INTO reports (name, longitude, latitude, bucket_name, file_name)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO reports (name, longitude, latitude, bucket_name, file_name, username, type, detail)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
             """
-            cursor.execute(query_reports, (name, longitude, latitude, bucket_name, file_name))
+            cursor.execute(query_reports, (name, longitude, latitude, bucket_name, file_name, username.strip(), type.lower(), detail))
             report_id = cursor.fetchone()[0]
-
-            # Insert or update 'upload_scoreboard' table
-            query_scoreboard = """
-                INSERT INTO upload_scoreboard (id, upload_count)
-                VALUES (%s, 1)
-                ON CONFLICT (id) DO UPDATE
-                SET upload_count = upload_scoreboard.upload_count + 1;
-            """
-            cursor.execute(query_scoreboard, (report_id,))
 
         # Commit the transaction
         cnx.commit()
@@ -136,8 +127,16 @@ async def upload_file(
     file: UploadFile = File(...),
     #hash: str = Form(...),
     location: str = Form(...),
-    name: str = Form(...)
+    name: str = Form(...),
+    username: str = Form(...),
+    type: str = Form(...),
+    description: str = Form(...)
 ):
+    
+    print(file, location, name, username, type, description)
+
+    latitude, longitude = location.replace('{"latitude":', '').replace('"longitude":',"").replace("}", "").split(",")
+    #print(latitude,longitude)
     
     # Read file content if needed
     file_content = await file.read()
@@ -183,9 +182,11 @@ async def upload_file(
 
     try:
         link = upload_to_blob(tmp_path, destination_file)
-        link = f'https://pub-7a565b2e83b14035b5d98e027dae5d16.r2.dev/{destination_file}'
+        #print("R2 upload Done")
+        #link = f'https://pub-7a565b2e83b14035b5d98e027dae5d16.r2.dev/{destination_file}'
         #save_metadata(name, location, link)
-        save_metadata_to_db(name, 0.0, 0.0, BUCKET_NAME, destination_file)
+        save_metadata_to_db(name, longitude, latitude, BUCKET_NAME, destination_file, username, type, description)
+        #print("SQL write done")
         
     except:
         print("An error occurred while uploading to R2:")
@@ -243,12 +244,12 @@ def fetch_image_data():
         raise HTTPException(status_code=500, detail="Failed to fetch data from database")
 
 
-@app.get("/view", response_class=HTMLResponse)
-async def show_images(request: Request):
-    # Fetch image data from the database
-    data = fetch_image_data()
-    # for img in data:
-    #     print(img)
-    #     img["link"] = f"https://e16d722126ccef480a24b7cc683d3e35.r2.cloudflarestorage.com/cloud-test-bucket/{img['file_name']}"  # Link expires in 1 hour
-    # Render the template with the fetched data
-    return templates.TemplateResponse("index.html", {"request": request, "images": data})
+# @app.get("/view", response_class=HTMLResponse)
+# async def show_images(request: Request):
+#     # Fetch image data from the database
+#     data = fetch_image_data()
+#     # for img in data:
+#     #     print(img)
+#     #     img["link"] = f"https://e16d722126ccef480a24b7cc683d3e35.r2.cloudflarestorage.com/cloud-test-bucket/{img['file_name']}"  # Link expires in 1 hour
+#     # Render the template with the fetched data
+#     return templates.TemplateResponse("index.html", {"request": request, "images": data})

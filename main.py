@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 import psycopg2
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 
 load_dotenv()
@@ -253,3 +254,11 @@ def fetch_image_data():
 #     #     img["link"] = f"https://e16d722126ccef480a24b7cc683d3e35.r2.cloudflarestorage.com/cloud-test-bucket/{img['file_name']}"  # Link expires in 1 hour
 #     # Render the template with the fetched data
 #     return templates.TemplateResponse("index.html", {"request": request, "images": data})
+
+
+@app.get("/start")
+async def start_endpoint():
+    """
+    Returns the current server datetime.
+    """
+    return {"current_datetime": datetime.now()}

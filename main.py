@@ -15,10 +15,15 @@ from botocore.exceptions import ClientError
 import psycopg2
 from contextlib import asynccontextmanager
 from datetime import datetime
+import pika
+import logging
 
 
 load_dotenv()
 
+# Configure logging for better error tracking
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 BUCKET_NAME = "cloud-test-bucket"
 
@@ -48,11 +53,45 @@ async def lifespan(app: FastAPI):
                               aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"))
     print("Successfully connected to Cloudflare R2")
     
+    # Setup RabbitMQ connection
+    global rabbitmq_connection, rabbitmq_channel
+    try:
+        credentials = pika.PlainCredentials(
+            os.getenv("RABBITMQ_USER"), 
+            os.getenv("RABBITMQ_PASS")
+        )
+        connection_params = pika.ConnectionParameters(
+            host=os.getenv("RABBITMQ_HOST"),
+            port=int(os.getenv("RABBITMQ_PORT", 5672)),
+            credentials=credentials,
+            heartbeat=600,  # Keep connection alive with heartbeat
+            blocked_connection_timeout=300,  # Timeout for blocked connections
+            connection_attempts=3,  # Number of connection attempts
+            retry_delay=2  # Delay between connection attempts
+        )
+        rabbitmq_connection = pika.BlockingConnection(connection_params)
+        rabbitmq_channel = rabbitmq_connection.channel()
+        
+        # Declare the queue to ensure it exists
+        queue_name = os.getenv("RABBITMQ_QUEUE")
+        rabbitmq_channel.queue_declare(queue=queue_name, durable=True)
+        
+        print("Successfully connected to RabbitMQ")
+    except Exception as e:
+        print(f"Failed to connect to RabbitMQ: {e}")
+        logger.warning(f"RabbitMQ connection failed during startup: {e}")
+        rabbitmq_connection = None
+        rabbitmq_channel = None
+    
     yield
     
     print("Closing connection to azureSQL")
     if cnx:
         cnx.close()
+    
+    print("Closing connection to RabbitMQ")
+    if rabbitmq_connection and not rabbitmq_connection.is_closed:
+        rabbitmq_connection.close()
 
 
 def save_metadata_to_db(name: str, longitude: float, latitude: float, bucket_name: str, file_name: str, username: str, type: str, detail: str):
@@ -77,6 +116,94 @@ def save_metadata_to_db(name: str, longitude: float, latitude: float, bucket_nam
         print(f"Error while saving metadata to database: {e}")
         raise HTTPException(status_code=500, detail="Failed to save metadata to database")
 
+
+def publish_to_rabbitmq(message: dict):
+    """
+    Publishes a message to the RabbitMQ queue with connection recovery.
+    
+    Args:
+        message (dict): The message to publish containing type, id, image_url, and report_id
+    """
+    global rabbitmq_channel, rabbitmq_connection
+    
+    # Function to establish/re-establish connection
+    def ensure_connection():
+        global rabbitmq_channel, rabbitmq_connection
+        try:
+            # Check if connection exists and is open
+            if not rabbitmq_connection or rabbitmq_connection.is_closed:
+                logger.info("Establishing new RabbitMQ connection...")
+                credentials = pika.PlainCredentials(
+                    os.getenv("RABBITMQ_USER"), 
+                    os.getenv("RABBITMQ_PASS")
+                )
+                connection_params = pika.ConnectionParameters(
+                    host=os.getenv("RABBITMQ_HOST"),
+                    port=int(os.getenv("RABBITMQ_PORT", 5672)),
+                    credentials=credentials,
+                    heartbeat=600,  # Add heartbeat to keep connection alive
+                    blocked_connection_timeout=300,
+                )
+                rabbitmq_connection = pika.BlockingConnection(connection_params)
+                
+            # Check if channel exists and is open
+            if not rabbitmq_channel or rabbitmq_channel.is_closed:
+                logger.info("Creating new RabbitMQ channel...")
+                rabbitmq_channel = rabbitmq_connection.channel()
+                # Declare the queue to ensure it exists
+                queue_name = os.getenv("RABBITMQ_QUEUE")
+                rabbitmq_channel.queue_declare(queue=queue_name, durable=True)
+                
+            return True
+        except Exception as e:
+            logger.error(f"Failed to establish RabbitMQ connection: {e}")
+            rabbitmq_connection = None
+            rabbitmq_channel = None
+            return False
+    
+    # Ensure we have a valid connection
+    if not ensure_connection():
+        logger.error("Unable to establish RabbitMQ connection")
+        return False
+    
+    try:
+        queue_name = os.getenv("RABBITMQ_QUEUE")
+        rabbitmq_channel.basic_publish(
+            exchange='',
+            routing_key=queue_name,
+            body=json.dumps(message),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Make message persistent
+                content_type='application/json'
+            )
+        )
+        logger.info(f"Successfully published message to queue {queue_name}: {message}")
+        return True
+    except (pika.exceptions.ChannelClosed, pika.exceptions.ConnectionClosed) as e:
+        logger.warning(f"RabbitMQ connection/channel closed, attempting to reconnect: {e}")
+        # Try to reconnect and publish again
+        if ensure_connection():
+            try:
+                rabbitmq_channel.basic_publish(
+                    exchange='',
+                    routing_key=queue_name,
+                    body=json.dumps(message),
+                    properties=pika.BasicProperties(
+                        delivery_mode=2,
+                        content_type='application/json'
+                    )
+                )
+                logger.info(f"Successfully published message after reconnection: {message}")
+                return True
+            except Exception as retry_e:
+                logger.error(f"Failed to publish message after reconnection: {retry_e}")
+                return False
+        else:
+            logger.error("Failed to reconnect to RabbitMQ")
+            return False
+    except Exception as e:
+        logger.error(f"Unexpected error publishing to RabbitMQ: {e}")
+        return False
 
 
 app = FastAPI(lifespan=lifespan)
@@ -186,12 +313,25 @@ async def upload_file(
         #print("R2 upload Done")
         #link = f'https://pub-7a565b2e83b14035b5d98e027dae5d16.r2.dev/{destination_file}'
         #save_metadata(name, location, link)
-        save_metadata_to_db(name, longitude, latitude, BUCKET_NAME, destination_file, username, type, description)
+        report_id = save_metadata_to_db(name, longitude, latitude, BUCKET_NAME, destination_file, username, type, description)
         #print("SQL write done")
         
-    except:
-        print("An error occurred while uploading to R2:")
-        raise HTTPException(status_code=500, detail="Failed to upload file to blob storage")
+        # Publish message to RabbitMQ queue (non-blocking - don't fail the upload if this fails)
+        try:
+            message = {
+                "type": type,
+                "id": destination_file,  # image_id is the file name
+                "image_url": f"https://img.roaport.com/{destination_file}",
+                "report_id": report_id
+            }
+            publish_to_rabbitmq(message)
+        except Exception as rabbitmq_error:
+            logger.error(f"Failed to publish to RabbitMQ: {rabbitmq_error}")
+            # Continue with the upload process even if RabbitMQ fails
+        
+    except Exception as e:
+        print(f"An error occurred while uploading to R2 or saving to database: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload file to blob storage or save metadata")
     finally:
         # Clean up the temporary file
         os.remove(tmp_path)

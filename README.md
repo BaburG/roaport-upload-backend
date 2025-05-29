@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is a FastAPI backend designed to handle file uploads, specifically images. It stores the uploaded files in Cloudflare R2 object storage and saves associated metadata to an Azure SQL (PostgreSQL) database. The application is containerized using Docker and includes a GitHub Actions workflow for automated CI/CD to Azure Container Apps.
+This project is a FastAPI backend designed to handle file uploads, specifically images. It stores the uploaded files in Cloudflare R2 object storage and saves associated metadata to an Azure SQL (PostgreSQL) database. After successful uploads, it publishes messages to a RabbitMQ queue for asynchronous processing. The application is containerized using Docker and includes a GitHub Actions workflow for automated CI/CD to Azure Container Apps.
 
 ## Features
 
@@ -15,6 +15,12 @@ This project is a FastAPI backend designed to handle file uploads, specifically 
     *   Calculates and returns the SHA256 hash of the uploaded file.
 *   **Metadata Storage:**
     *   Saves metadata (report name, longitude, latitude, bucket name, file name, username, report type, description) to an Azure SQL (PostgreSQL) database.
+*   **RabbitMQ Message Queue Integration:**
+    *   Publishes messages to a RabbitMQ queue after successful file uploads and metadata storage.
+    *   Message format includes report type, image file name, image URL, and report ID.
+    *   Non-blocking implementation - upload process continues even if RabbitMQ publishing fails.
+    *   Automatic connection recovery - handles network issues and connection drops gracefully.
+    *   Configurable heartbeat and connection timeouts for improved reliability.
 *   **Image Viewing (Conceptual):**
     *   A `GET /view/` endpoint and corresponding HTML template (`templates/index.html`) are present in the codebase to display uploaded images and their details. This endpoint fetches data from the database.
     *   *(Note: This endpoint is currently commented out in `main.py` but the underlying logic and template exist).*
@@ -41,6 +47,7 @@ This project is a FastAPI backend designed to handle file uploads, specifically 
 *   **Backend:** Python, FastAPI
 *   **Database:** Azure SQL (PostgreSQL), `psycopg2`
 *   **Object Storage:** Cloudflare R2, `boto3`
+*   **Message Queue:** RabbitMQ, `pika`
 *   **Containerization:** Docker
 *   **CI/CD:** GitHub Actions, Azure Container Apps, Azure Container Registry
 *   **Templating:** Jinja2 (for the conceptual `/view` endpoint)
@@ -54,6 +61,7 @@ This project is a FastAPI backend designed to handle file uploads, specifically 
 *   Docker (optional, for running in a container)
 *   Access to an Azure SQL (PostgreSQL) database
 *   Access to Cloudflare R2 (or compatible S3 storage)
+*   Access to a RabbitMQ server
 
 **Environment Variables:**
 Create a `.env` file in the root directory with the following variables:
@@ -70,6 +78,13 @@ AZURE_SQL_HOST=<your_azure_sql_host>
 R2_ENDPOINT_URL=<your_r2_endpoint_url>
 R2_ACCESS_KEY=<your_r2_access_key_id>
 R2_SECRET_ACCESS_KEY=<your_r2_secret_access_key>
+
+# RabbitMQ Configuration
+RABBITMQ_HOST=<your_rabbitmq_host>
+RABBITMQ_PORT=<your_rabbitmq_port>
+RABBITMQ_USER=<your_rabbitmq_username>
+RABBITMQ_PASS=<your_rabbitmq_password>
+RABBITMQ_QUEUE=<your_queue_name>
 ```
 
 **Installation:**
@@ -138,6 +153,30 @@ pytest
         }
         ```
 
+## RabbitMQ Message Format
+
+After successful file upload and metadata storage, the application publishes a message to the configured RabbitMQ queue with the following JSON structure:
+
+```json
+{
+    "type": "report_type",
+    "id": "uuid_filename.extension", 
+    "image_url": "https://presigned_url_to_image",
+    "report_id": 123
+}
+```
+
+**Message Fields:**
+*   `type`: The report type/category (e.g., "pothole", "graffiti")
+*   `id`: The unique filename generated for the uploaded image
+*   `image_url`: The presigned URL to access the uploaded image in R2 storage
+*   `report_id`: The auto-generated ID from the database reports table
+
+**Queue Configuration:**
+*   Messages are published with `delivery_mode=2` for persistence
+*   Content type is set to `application/json`
+*   The queue is declared as durable during application startup
+
 ## Deployment
 
 This project is configured for automated deployment to Azure Container Apps via GitHub Actions.
@@ -149,7 +188,3 @@ This project is configured for automated deployment to Azure Container Apps via 
     4.  Pushes the image to the Azure Container Registry (`roaport.azurecr.io`).
     5.  Deploys the new image to the `roaport-upload-backend` container app within the `roaport-resource-group` resource group.
 *   Necessary Azure credentials (`ROAPORTUPLOADBACKEND_AZURE_CREDENTIALS`, `ROAPORTUPLOADBACKEND_REGISTRY_USERNAME`, `ROAPORTUPLOADBACKEND_REGISTRY_PASSWORD`) must be configured in the GitHub repository's secrets.
-
-## Future Enhancements
-
-*   **Implement a RabbitMQ message queue:** To decouple tasks like post-upload processing (e.g., thumbnail generation, advanced image analysis, sending notifications) from the synchronous upload request. This can improve the API's responsiveness and resilience. Upon successful file upload and initial metadata storage, a message could be published to a RabbitMQ queue for asynchronous workers to consume and process further.

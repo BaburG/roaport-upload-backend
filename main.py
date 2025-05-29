@@ -16,6 +16,7 @@ import psycopg2
 from contextlib import asynccontextmanager
 from datetime import datetime
 import pika
+import pika.exceptions  # Make sure this is imported
 import logging
 
 
@@ -55,33 +56,13 @@ async def lifespan(app: FastAPI):
     
     # Setup RabbitMQ connection
     global rabbitmq_connection, rabbitmq_channel
-    try:
-        credentials = pika.PlainCredentials(
-            os.getenv("RABBITMQ_USER"), 
-            os.getenv("RABBITMQ_PASS")
-        )
-        connection_params = pika.ConnectionParameters(
-            host=os.getenv("RABBITMQ_HOST"),
-            port=int(os.getenv("RABBITMQ_PORT", 5672)),
-            credentials=credentials,
-            heartbeat=600,  # Keep connection alive with heartbeat
-            blocked_connection_timeout=300,  # Timeout for blocked connections
-            connection_attempts=3,  # Number of connection attempts
-            retry_delay=2  # Delay between connection attempts
-        )
-        rabbitmq_connection = pika.BlockingConnection(connection_params)
-        rabbitmq_channel = rabbitmq_connection.channel()
-        
-        # Declare the queue to ensure it exists
-        queue_name = os.getenv("RABBITMQ_QUEUE")
-        rabbitmq_channel.queue_declare(queue=queue_name, durable=True)
-        
-        print("Successfully connected to RabbitMQ")
-    except Exception as e:
-        print(f"Failed to connect to RabbitMQ: {e}")
-        logger.warning(f"RabbitMQ connection failed during startup: {e}")
-        rabbitmq_connection = None
-        rabbitmq_channel = None
+    rabbitmq_connection = None  # Initialize as None
+    rabbitmq_channel = None     # Initialize as None
+    
+    # Attempt initial connection (optional here, can be deferred to first publish)
+    # For now, let the publish_to_rabbitmq handle the first connection.
+    # This avoids holding a connection if no uploads happen for a while after startup.
+    print("RabbitMQ connection will be established on first publish")
     
     yield
     
@@ -119,20 +100,21 @@ def save_metadata_to_db(name: str, longitude: float, latitude: float, bucket_nam
 
 def publish_to_rabbitmq(message: dict):
     """
-    Publishes a message to the RabbitMQ queue with connection recovery.
+    Publishes a message to the RabbitMQ queue with connection recovery and publisher confirms.
     
     Args:
         message (dict): The message to publish containing type, id, image_url, and report_id
+        
+    Returns:
+        bool: True if message was successfully published and confirmed, False otherwise
     """
     global rabbitmq_channel, rabbitmq_connection
-    
-    # Function to establish/re-establish connection
-    def ensure_connection():
+
+    def ensure_connection_and_confirm_mode():
         global rabbitmq_channel, rabbitmq_connection
         try:
-            # Check if connection exists and is open
             if not rabbitmq_connection or rabbitmq_connection.is_closed:
-                logger.info("Establishing new RabbitMQ connection...")
+                logger.info("RabbitMQ: Establishing new connection...")
                 credentials = pika.PlainCredentials(
                     os.getenv("RABBITMQ_USER"), 
                     os.getenv("RABBITMQ_PASS")
@@ -141,69 +123,127 @@ def publish_to_rabbitmq(message: dict):
                     host=os.getenv("RABBITMQ_HOST"),
                     port=int(os.getenv("RABBITMQ_PORT", 5672)),
                     credentials=credentials,
-                    heartbeat=600,  # Add heartbeat to keep connection alive
+                    heartbeat=60,  # Shorten heartbeat to 60 seconds
                     blocked_connection_timeout=300,
                 )
                 rabbitmq_connection = pika.BlockingConnection(connection_params)
-                
-            # Check if channel exists and is open
+                logger.info("RabbitMQ: Connection established.")
+            
             if not rabbitmq_channel or rabbitmq_channel.is_closed:
-                logger.info("Creating new RabbitMQ channel...")
+                logger.info("RabbitMQ: Creating new channel...")
                 rabbitmq_channel = rabbitmq_connection.channel()
+                # Enable transactions instead of publisher confirms
+                rabbitmq_channel.tx_select()
+                logger.info("RabbitMQ: Channel created and transactions enabled.")
+                
                 # Declare the queue to ensure it exists
                 queue_name = os.getenv("RABBITMQ_QUEUE")
-                rabbitmq_channel.queue_declare(queue=queue_name, durable=True)
+                # Add more queue details for debugging
+                try:
+                    method = rabbitmq_channel.queue_declare(queue=queue_name, durable=True, passive=False)
+                    logger.info(f"RabbitMQ: Queue '{queue_name}' declared successfully. Messages in queue: {method.method.message_count}")
+                except Exception as queue_error:
+                    logger.error(f"RabbitMQ: Failed to declare queue '{queue_name}': {queue_error}")
+                    raise queue_error
                 
             return True
         except Exception as e:
-            logger.error(f"Failed to establish RabbitMQ connection: {e}")
+            logger.error(f"RabbitMQ: Failed to establish connection/channel: {e}")
+            # Reset global vars on failure to ensure full re-init next time
             rabbitmq_connection = None
             rabbitmq_channel = None
             return False
-    
-    # Ensure we have a valid connection
-    if not ensure_connection():
-        logger.error("Unable to establish RabbitMQ connection")
-        return False
-    
+
+    # Validate message before attempting to publish
     try:
-        queue_name = os.getenv("RABBITMQ_QUEUE")
-        rabbitmq_channel.basic_publish(
-            exchange='',
-            routing_key=queue_name,
-            body=json.dumps(message),
-            properties=pika.BasicProperties(
-                delivery_mode=2,  # Make message persistent
-                content_type='application/json'
-            )
-        )
-        logger.info(f"Successfully published message to queue {queue_name}: {message}")
-        return True
-    except (pika.exceptions.ChannelClosed, pika.exceptions.ConnectionClosed) as e:
-        logger.warning(f"RabbitMQ connection/channel closed, attempting to reconnect: {e}")
-        # Try to reconnect and publish again
-        if ensure_connection():
-            try:
-                rabbitmq_channel.basic_publish(
-                    exchange='',
-                    routing_key=queue_name,
-                    body=json.dumps(message),
-                    properties=pika.BasicProperties(
-                        delivery_mode=2,
-                        content_type='application/json'
-                    )
-                )
-                logger.info(f"Successfully published message after reconnection: {message}")
-                return True
-            except Exception as retry_e:
-                logger.error(f"Failed to publish message after reconnection: {retry_e}")
-                return False
-        else:
-            logger.error("Failed to reconnect to RabbitMQ")
+        # Ensure message is JSON serializable and not too large
+        message_json = json.dumps(message)
+        message_size = len(message_json.encode('utf-8'))
+        logger.info(f"RabbitMQ: Message size: {message_size} bytes for report_id: {message.get('report_id', 'unknown')}")
+        
+        # Check if message is too large (RabbitMQ default max is usually 128MB, but some configs are much smaller)
+        if message_size > 1024 * 1024:  # 1MB threshold for warning
+            logger.warning(f"RabbitMQ: Large message detected ({message_size} bytes). This might cause issues.")
+        
+        # Validate message structure
+        required_fields = ['type', 'id', 'image_url', 'report_id']
+        missing_fields = [field for field in required_fields if field not in message]
+        if missing_fields:
+            logger.error(f"RabbitMQ: Message missing required fields: {missing_fields}")
             return False
-    except Exception as e:
-        logger.error(f"Unexpected error publishing to RabbitMQ: {e}")
+            
+        logger.info(f"RabbitMQ: Message validation passed for report_id: {message['report_id']}")
+        
+    except Exception as validation_error:
+        logger.error(f"RabbitMQ: Message validation failed: {validation_error}")
         return False
+
+    MAX_RETRIES = 3
+    retry_count = 0
+    
+    while retry_count < MAX_RETRIES:
+        if not ensure_connection_and_confirm_mode():
+            logger.error("RabbitMQ: Unable to establish connection and channel for publishing.")
+            retry_count += 1
+            if retry_count >= MAX_RETRIES: 
+                return False  # Exhausted connection retries
+            continue  # Try to connect again
+
+        try:
+            queue_name = os.getenv("RABBITMQ_QUEUE")
+            
+            # Log the exact message being sent for debugging
+            logger.info(f"RabbitMQ: Attempting to publish message: {json.dumps(message)} to queue '{queue_name}'")
+            
+            # Publish message (no return value check needed with transactions)
+            rabbitmq_channel.basic_publish(
+                exchange='',
+                routing_key=queue_name,
+                body=json.dumps(message),
+                properties=pika.BasicProperties(
+                    delivery_mode=pika.spec.PERSISTENT_DELIVERY_MODE,  # Use pika.spec constant
+                    content_type='application/json',
+                    # Add message ID for tracking
+                    message_id=str(message.get('report_id', 'unknown'))
+                ),
+                mandatory=True  # This will cause an exception if message can't be routed
+            )
+            
+            # Commit the transaction - this blocks until RabbitMQ confirms delivery
+            rabbitmq_channel.tx_commit()
+            logger.info(f"RabbitMQ: Successfully published and committed message to queue '{queue_name}': {message['report_id']}")
+            return True
+        
+        except pika.exceptions.UnroutableError as e:
+            logger.error(f"RabbitMQ: Message unroutable (queue might not exist or be accessible): {e}. Message: {message['report_id']}. This is a permanent error for this message.")
+            return False  # Don't retry unroutable messages
+        except (pika.exceptions.ChannelClosedByBroker, pika.exceptions.ConnectionClosedByBroker) as e:
+            logger.warning(f"RabbitMQ: Channel or Connection closed by broker: {e}. Retrying ({retry_count+1}/{MAX_RETRIES})...")
+            # Check if the error gives us more details about why it was closed
+            if hasattr(e, 'reply_code') and hasattr(e, 'reply_text'):
+                logger.error(f"RabbitMQ: Broker close reason - Code: {e.reply_code}, Text: {e.reply_text}")
+            rabbitmq_channel = None  # Force channel re-creation
+            rabbitmq_connection = None  # Force connection re-creation
+            retry_count += 1
+        except (pika.exceptions.ChannelWrongStateError, pika.exceptions.StreamLostError, pika.exceptions.AMQPConnectionError) as e:
+            logger.warning(f"RabbitMQ: Connection/Channel error: {e}. Retrying ({retry_count+1}/{MAX_RETRIES})...")
+            rabbitmq_channel = None  # Force channel re-creation
+            rabbitmq_connection = None  # Force connection re-creation
+            retry_count += 1
+        except Exception as e:
+            logger.error(f"RabbitMQ: Unexpected error publishing: {e}. Retrying ({retry_count+1}/{MAX_RETRIES})...")
+            # Log the full exception details
+            import traceback
+            logger.error(f"RabbitMQ: Full traceback: {traceback.format_exc()}")
+            rabbitmq_channel = None
+            rabbitmq_connection = None
+            retry_count += 1
+            
+        if retry_count >= MAX_RETRIES:
+            logger.error(f"RabbitMQ: Failed to publish message after {MAX_RETRIES} retries: {message['report_id']}")
+            return False
+            
+    return False  # Should not be reached if logic is correct
 
 
 app = FastAPI(lifespan=lifespan)
@@ -215,7 +255,7 @@ def upload_to_blob(file_path: str, destination_file: str):
     except ClientError as e:
         if e.response['Error']['Code'] == '404':
             # Bucket doesn't exist, create it
-            s3_client.create_bucket(Bucket=BUCKET_NAME)
+            objectStorageClient.create_bucket(Bucket=BUCKET_NAME)  # Fixed: changed s3_client to objectStorageClient
             print("Created bucket", BUCKET_NAME)
         else:
             print(f"Error checking bucket: {e}")
@@ -316,7 +356,7 @@ async def upload_file(
         report_id = save_metadata_to_db(name, longitude, latitude, BUCKET_NAME, destination_file, username, type, description)
         #print("SQL write done")
         
-        # Publish message to RabbitMQ queue (non-blocking - don't fail the upload if this fails)
+        # Publish message to RabbitMQ queue with improved error handling
         try:
             message = {
                 "type": type,
@@ -324,10 +364,16 @@ async def upload_file(
                 "image_url": f"https://img.roaport.com/{destination_file}",
                 "report_id": report_id
             }
-            publish_to_rabbitmq(message)
-        except Exception as rabbitmq_error:
-            logger.error(f"Failed to publish to RabbitMQ: {rabbitmq_error}")
-            # Continue with the upload process even if RabbitMQ fails
+            if publish_to_rabbitmq(message):
+                logger.info(f"Upload endpoint: RabbitMQ publish successful for report_id: {report_id}")
+            else:
+                # This is CRITICAL: you now know it failed despite retries
+                logger.error(f"Upload endpoint: RabbitMQ publish FAILED for report_id: {report_id}. The upload will still succeed as per design.")
+                # Depending on your requirements, you might:
+                # - Add to a dead-letter queue/database for later retry by a separate process
+                # - Raise an alert
+        except Exception as rabbitmq_error:  # Catchall for unexpected errors from publish_to_rabbitmq itself
+            logger.error(f"Upload endpoint: Exception during RabbitMQ publish call for report_id {report_id}: {rabbitmq_error}")
         
     except Exception as e:
         print(f"An error occurred while uploading to R2 or saving to database: {e}")

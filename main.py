@@ -75,17 +75,17 @@ async def lifespan(app: FastAPI):
         rabbitmq_connection.close()
 
 
-def save_metadata_to_db(name: str, longitude: float, latitude: float, bucket_name: str, file_name: str, username: str, type: str, detail: str):
+def save_metadata_to_db(name: str, longitude: float, latitude: float, bucket_name: str, file_name: str, username: str, type: str, detail: str, notification_token: str = None):
     global cnx
     try:
         with cnx.cursor() as cursor:
-            # Insert into 'reports' table
+            # Insert into 'reports' table with notification_token
             query_reports = """
-                INSERT INTO reports (name, longitude, latitude, bucket_name, file_name, username, type, detail)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO reports (name, longitude, latitude, bucket_name, file_name, username, type, detail, notification_token)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
             """
-            cursor.execute(query_reports, (name, longitude, latitude, bucket_name, file_name, username.strip(), type.lower(), detail))
+            cursor.execute(query_reports, (name, longitude, latitude, bucket_name, file_name, username.strip(), type.lower(), detail, notification_token))
             report_id = cursor.fetchone()[0]
 
         # Commit the transaction
@@ -293,18 +293,17 @@ def save_metadata(name: str, location: str, link: str):
 @app.post("/upload/")
 async def upload_file(
     file: UploadFile = File(...),
-    #hash: str = Form(...),
     location: str = Form(...),
     name: str = Form(...),
     username: str = Form(...),
     type: str = Form(...),
-    description: str = Form(...)
+    description: str = Form(...),
+    pushToken: str = Form(None)  # Add optional pushToken parameter
 ):
     
     print(file, location, name, username, type, description)
 
     latitude, longitude = location.replace('{"latitude":', '').replace('"longitude":',"").replace("}", "").split(",")
-    #print(latitude,longitude)
     
     # Read file content if needed
     file_content = await file.read()
@@ -324,21 +323,6 @@ async def upload_file(
         raise HTTPException(
             status_code=400, detail=f"Filename extension does not match file type: expected {expected_extension}"
         )
-    
-    # # Validate file size from headers (client-provided)
-    # max_file_size = 10 * 1024 * 1024  # 10 MB
-    # content_length = file.headers.get("content-length")
-    # print(content_length)
-    # if content_length and int(content_length) > max_file_size:
-    #     raise HTTPException(
-    #         status_code=413, detail="File size exceeds the 10MB limit"
-    #     )
-    
-    
-    # print(hashlib.sha256(file_content).hexdigest())
-    # if file_hash != hash:
-    #     print(file_hash)
-    #     raise HTTPException(status_code=400, detail="Hash mismatch")
 
     # Write file to a temporary location
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -350,11 +334,17 @@ async def upload_file(
 
     try:
         link = upload_to_blob(tmp_path, destination_file)
-        #print("R2 upload Done")
-        #link = f'https://pub-7a565b2e83b14035b5d98e027dae5d16.r2.dev/{destination_file}'
-        #save_metadata(name, location, link)
-        report_id = save_metadata_to_db(name, longitude, latitude, BUCKET_NAME, destination_file, username, type, description)
-        #print("SQL write done")
+        report_id = save_metadata_to_db(
+            name, 
+            longitude, 
+            latitude, 
+            BUCKET_NAME, 
+            destination_file, 
+            username, 
+            type, 
+            description,
+            pushToken  # Pass the pushToken to the function
+        )
         
         # Publish message to RabbitMQ queue with improved error handling
         try:
@@ -367,12 +357,8 @@ async def upload_file(
             if publish_to_rabbitmq(message):
                 logger.info(f"Upload endpoint: RabbitMQ publish successful for report_id: {report_id}")
             else:
-                # This is CRITICAL: you now know it failed despite retries
                 logger.error(f"Upload endpoint: RabbitMQ publish FAILED for report_id: {report_id}. The upload will still succeed as per design.")
-                # Depending on your requirements, you might:
-                # - Add to a dead-letter queue/database for later retry by a separate process
-                # - Raise an alert
-        except Exception as rabbitmq_error:  # Catchall for unexpected errors from publish_to_rabbitmq itself
+        except Exception as rabbitmq_error:
             logger.error(f"Upload endpoint: Exception during RabbitMQ publish call for report_id {report_id}: {rabbitmq_error}")
         
     except Exception as e:
@@ -387,7 +373,6 @@ async def upload_file(
         "filename": file.filename,
         "content_type": file.content_type,
         "file_hash": file_hash,
-        #"reported_hash": hash,
         "location": location,
         "name": name,
     }
